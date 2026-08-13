@@ -1,0 +1,127 @@
+Today 1:04 AM
+
+Scanning the frontend/backend code for hard-coded email/tool workflows and draft approvals.
+
+Reviewing the exact code paths for hard-coded email and MCP workflow behavior.
+
+I’m identifying explicit hard-coded workflow rules in the frontend/backend source.
+
+Searched for regex Approve & Send|This does NOT send immediately|HUMAN-IN-THE-LOOP|ConfirmRisky|client_tools|tool.*approval|human-in-the-loop|Phase 4b|draft.*review|prepare.*draft|send immediately|not configured|provider_configured (**/chat_interface/**/*.{ts,tsx,js,py,json,md}), 27 results
+
+Checking the workflow enforcement code and the client_tool approval path for exact hard-coded behavior.
+
+Read canvas-store.ts, lines 1 to 140
+
+The hard-coded workflows are mostly in the HR app’s frontend/backend glue, not in the Gmail MCP itself.
+
+Key hard-coded workflows
+Human-in-the-loop comms workflow
+hr-actions.ts
+route.ts
+This is the main hard-coded rule:
+send_email, send_slack_message, send_teams_message only prepare drafts.
+They do not send immediately.
+The app must show the draft on the Side Canvas and wait for user approval.
+The system prompt explicitly says “Never claim it was already sent.”
+Approval / confirmation policy
+route.ts
+confirm_policy: ConfirmRisky
+This is a hard-coded safety workflow:
+unknown or risky tool actions require explicit approval.
+read-only lookups are allowed, but write/comms actions are gated.
+Side Canvas action approval flow
+canvas-store.ts
+side-canvas.tsx
+The UX is hard-coded so action results become action_approval artifacts,
+and approval is sent through /api/chat/confirm.
+MCP tool availability / config flow
+route.ts
+mcp-store.tsx
+mcp-setup-dialog.tsx
+The backend conversation hard-codes mcp_config: buildMcpConfig() and
+the front-end has a specific MCP server provisioning/configuration path.
+In this build, the app is configured to use HR data tools and client_tools,
+not arbitrary exec tools.
+HR persona / grounding workflow
+route.ts
+The system prompt has hard-coded HR rules:
+stay in HR,
+use tools first,
+do not invent facts,
+treat comms as drafts.
+What this means for your issue
+The app does have a hard-coded “draft first, send only after approval” workflow.
+That is likely why the agent says it prepares a draft and does not send directly.
+It is not just about whether Gmail MCP exists — this workflow is intentionally enforced by the app.
+
+If you want, I can also list the exact code locations where the Gmail/MCP availability and approval path are implemented.
+
+1:03 AM37s•
+
+Yes — this confirms the problem.
+
+Your HR Agent itself is enforcing the “draft → human approval → send” behavior, rather than Gmail MCP requiring that behavior.
+
+So even if Gmail MCP has a working send_email tool, your current architecture is effectively:
+
+User → HR Agent → send_email → create draft → Side Canvas → approval → /api/chat/confirm → actually send
+
+instead of:
+
+User → HR Agent → Gmail MCP send_email → Gmail sends
+
+The important distinction
+
+There are really two separate layers:
+
+MCP layer
+Gmail MCP exposes tools such as reading/searching/sending email.
+It should be capable of performing the actual action.
+HR Agent orchestration layer
+Your route.ts / hr-actions.ts is deciding that sending email is a risky action.
+It converts the action into an approval artifact.
+ConfirmRisky then requires the user to approve it.
+
+So adding/fixing Gmail MCP won't automatically remove the approval requirement.
+
+What I'd change
+
+If your goal is a production HR agent that can actually execute workflows autonomously, I would not remove human approval globally.
+
+Instead, make the policy tool/action-specific and configurable:
+
+Read operations → automatic
+Low-risk writes → automatic if configured
+External communications → configurable
+High-risk HR actions → always require approval
+Unknown/destructive actions → always require approval
+
+For example:
+
+Action	Default
+Search Gmail	Auto
+Read email	Auto
+Create email draft	Auto
+Send routine email	Configurable
+Send termination email	Approval
+Change employee compensation	Approval
+Delete HR data	Approval
+Send Slack message	Configurable
+
+The biggest architectural issue is that your code currently appears to have specific knowledge of send_email, send_slack_message, and send_teams_message. That means the agent/orchestrator is treating these as special HR workflows rather than simply discovering and executing MCP tools according to a general policy.
+
+What you should tell Claude
+
+I would have Claude refactor it so that the MCP server owns the actual tool implementation, while the HR Agent owns a generic permission/approval policy.
+
+In other words:
+
+Don't hard-code “email = draft only” into hr-actions.ts.
+
+Instead:
+
+Look at the MCP tool's metadata/policy and determine whether approval is required before executing it.
+
+That will make your architecture much more scalable when you add Gmail, Slack, Teams, GitHub, Linear, Microsoft 365, etc.
+
+And importantly, keep the approval infrastructure. Just stop hard-coding every communication tool into “draft only.”
